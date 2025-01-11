@@ -182,24 +182,58 @@ class ProjectAgent:
 
         return action
     
+    """
     def load(self):
-        """
-        Load the model from the model_path.
-        """
+       
         self.policy_net.load_state_dict(torch.load('model.pth'))
         self.target_net.load_state_dict(self.policy_net.state_dict())
 
     def save(self,path):
-        """
-        Save the model to the model_path.
-        """
+        
         torch.save(self.policy_net.state_dict(), 'model.pth')
         
+    """
+
+    def load(self):
+        """
+        Load the agent's policy network and optimizer states from the specified file path.
+
+        Note: Always loads the model to the CPU to ensure compatibility with grading requirements.
+
+        Args:
+            path (str): The file path from which the agent's state should be loaded.
+        """
+        path = 'model.pth'
+        checkpoint = torch.load(path, map_location=torch.device('cpu'))  # Load on CPU
+        self.policy_net.load_state_dict(checkpoint['policy_net_state_dict'])
+        self.target_net.load_state_dict(checkpoint['target_net_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.steps_done = checkpoint['steps_done']
+        print(f"Model loaded from {path}.")
+
+    def save(self, path: str) -> None:
+        """
+        Save the agent's policy network and optimizer states to the specified file path.
+
+        Args:
+            path (str): The file path where the agent's state should be saved.
+        """
+        path = 'model.pth'
+        torch.save({
+            'policy_net_state_dict': self.policy_net.state_dict(),
+            'target_net_state_dict': self.target_net.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'steps_done': self.steps_done,
+        }, path)
+        print(f"Model saved to {path}.")
+    
 
 if __name__ == "__main__":
     agent = ProjectAgent()
     agent.train(n_episodes=10)
     agent.save('model.pth')
+    agent.load()
+
     print("Model saved.")
          
         

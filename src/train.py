@@ -249,7 +249,7 @@ from copy import deepcopy
 import random
 from gymnasium.wrappers import TimeLimit
 from env_hiv import HIVPatient
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
 from collections import namedtuple, deque
 import math
 

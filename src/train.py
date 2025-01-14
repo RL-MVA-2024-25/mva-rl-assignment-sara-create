@@ -1,246 +1,4 @@
-"""
-import gymnasium as gym
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from collections import deque
-import random
-from gymnasium.wrappers import TimeLimit
-from env_hiv import HIVPatient
-import os
-import torch.nn.functional as F
-from collections import namedtuple, deque
-import math
-import matplotlib.pyplot as plt
-from tqdm import tqdm
 
-
-env = TimeLimit(
-    env=HIVPatient(domain_randomization=False), max_episode_steps=200
-) 
-Transition = namedtuple('Transition',
-                        ('state', 'action', 'next_state', 'reward'))
-
-device = torch.device(
-    "cuda" if torch.cuda.is_available() else
-    "mps" if torch.backends.mps.is_available() else
-    "cpu"
-)
-
-class DQN(nn.Module):
-
-    def __init__(self, n_observations, n_actions):
-        super(DQN, self).__init__()
-        self.layer1 = nn.Linear(n_observations, 128)
-        self.layer2 = nn.Linear(128, 128)
-        self.layer3 = nn.Linear(128, n_actions)
-
-    def forward(self, x):
-        x = F.relu(self.layer1(x))
-        x = F.relu(self.layer2(x))
-        return self.layer3(x)
-    
-
-class ReplayMemory(object):
-
-    def __init__(self, capacity):
-        self.memory = deque([], maxlen=capacity)
-
-    def push(self, *args):
-        
-        self.memory.append(Transition(*args))
-
-    def sample(self, batch_size):
-        return random.sample(self.memory, batch_size)
-
-    def __len__(self):
-        return len(self.memory)
-
-class ProjectAgent:
-    def __init__(self):
-        
-        Initialize the agent.
-        
-        Args:
-        - n_observations: Number of input features (state size).
-        - n_actions: Number of possible actions.
-        - model_path: Path to save/load the model.
-        
-
-        self.env = env
-        self.device = device
-        self.n_actions  = self.env.action_space.n
-        self.n_observations = self.env.observation_space.shape[0]
-
-        # Hyperparameters
-        self.batch_size = 250
-        self.gamma = 0.99
-        self.eps_start = 0.9
-        self.eps_end = 0.01
-        self.eps_decay = 2000
-        self.tau = 0.05
-        self.lr =1e-3
-
-        # Networks
-        self.policy_net = DQN(self.n_observations, self.n_actions).to(device)
-        self.target_net = DQN(self.n_observations, self.n_actions).to(device)
-        self.target_net.load_state_dict(self.policy_net.state_dict())
-        self.target_net.eval()
-
-        # Optimizer and memory
-        self.optimizer = optim.AdamW(self.policy_net.parameters(), lr=self.lr, amsgrad=True)
-        self.memory = ReplayMemory(10000)
-
-        # Epsilon-greedy tracking
-        self.steps_done = 0
-
-    def optimize_model(self):
-        if len(self.memory) < self.batch_size:
-            return
-        transitions = self.memory.sample(self.batch_size)
-        batch = Transition(*zip(*transitions))
-        non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
-                                            batch.next_state)), device=device, dtype=torch.bool)
-        non_final_next_states = torch.cat([s for s in batch.next_state
-                                                    if s is not None])
-        state_batch = torch.cat(batch.state)
-        action_batch = torch.cat(batch.action)
-        reward_batch = torch.cat(batch.reward)
-        state_action_values = self.policy_net(state_batch).gather(1, action_batch)
-
-        next_state_values = torch.zeros(self.batch_size, device=device)
-        with torch.no_grad():
-            next_state_values[non_final_mask] = self.target_net(non_final_next_states).max(1).values
-        # Compute the expected Q values
-        expected_state_action_values = (next_state_values * self.gamma) + reward_batch
-
-        # Compute Huber loss
-        criterion = nn.SmoothL1Loss()
-        loss = criterion(state_action_values, expected_state_action_values.unsqueeze(1))
-
-        # Optimize the model
-        self.optimizer.zero_grad()
-        loss.backward()
-        # In-place gradient clipping
-        torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 100)
-        self.optimizer.step()
-
-
-
-    def train(self, n_episodes=1000):
-        episode_rewards = []  # Track rewards for each episode
-        # Wrap the episode loop with tqdm
-        for i_episode in tqdm(range(n_episodes), desc="Training Progress"):
-            state, info = env.reset()
-            state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-            total_reward = 0  # Cumulative reward for this episode
-            for t in range(200):
-                action = self.act(state)
-                observation, reward, terminated, truncated, _ = env.step(action.item())
-                total_reward += reward  # Accumulate reward
-                reward = torch.tensor([reward], device=device)
-                done = terminated or truncated
-
-                if terminated:
-                    next_state = None
-                else:
-                    next_state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
-
-                # Store the transition in memory
-                self.memory.push(state, action, next_state, reward)
-
-                # Move to the next state
-                state = next_state
-
-                # Perform one step of the optimization (on the policy network)
-                self.optimize_model()
-
-                # Soft update of the target network's weights
-                target_net_state_dict = self.target_net.state_dict()
-                policy_net_state_dict = self.policy_net.state_dict()
-                for key in policy_net_state_dict:
-                    target_net_state_dict[key] = policy_net_state_dict[key] * self.tau + target_net_state_dict[key] * (1 - self.tau)
-                self.target_net.load_state_dict(target_net_state_dict)
-
-                if done:
-                    break
-            episode_rewards.append(total_reward)  # Store total reward for this episode
-
-        # Plotting the rewards
-        plt.plot(range(n_episodes), episode_rewards)
-        plt.xlabel('Episodes')
-        plt.ylabel('Total Reward')
-        plt.title('Reward vs Episodes')
-        # Save the plot as an image file
-        plt.savefig("reward_vs_episodes.png", dpi=300)
-        plt.show()
-            
-    def act(self, observation, use_random=False): 
-        
-        Select an action based on the observation.
-        
-        Args:
-        - observation: Current state.
-        - use_random: Whether to select a random action.
-        
-        Returns:
-        - action: Selected action.
-        
-        self.steps_done += 1
-        observation = torch.from_numpy(observation).float().unsqueeze(0).to(self.device)
-        if use_random or random.random() < self.eps_end + (self.eps_start - self.eps_end) * \
-            math.exp(-1. * self.steps_done / self.eps_decay):
-            action =  torch.tensor([[random.randrange(self.n_actions)]], device=self.device, dtype=torch.long)
-        else:
-            with torch.no_grad():
-                action = self.policy_net(observation).max(1)[1].view(1, 1)
-
-        return action
-    
-
-    def load(self):
-        
-        Load the agent's policy network and optimizer states from the specified file path.
-
-        Note: Always loads the model to the CPU to ensure compatibility with grading requirements.
-
-        Args:
-            path (str): The file path from which the agent's state should be loaded.
-        
-        path = 'model.pth'
-        checkpoint = torch.load(path, map_location=torch.device('cpu'))  # Load on CPU
-        self.policy_net.load_state_dict(checkpoint['policy_net_state_dict'])
-        self.target_net.load_state_dict(checkpoint['target_net_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.steps_done = checkpoint['steps_done']
-        print(f"Model loaded from {path}.")
-
-    def save(self, path: str) -> None:
-        
-        Save the agent's policy network and optimizer states to the specified file path.
-
-        Args:
-            path (str): The file path where the agent's state should be saved.
-        
-        path = 'model.pth'
-        torch.save({
-            'policy_net_state_dict': self.policy_net.state_dict(),
-            'target_net_state_dict': self.target_net.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'steps_done': self.steps_done,
-        }, path)
-        print(f"Model saved to {path}.")
-    
-
-if __name__ == "__main__":
-    agent = ProjectAgent()
-    agent.train(n_episodes=1000)
-    agent.save('model.pth')
-    agent.load()
-    
-    print("Model saved.")
-""" 
 
 import numpy as np
 import torch
@@ -252,6 +10,7 @@ from env_hiv import HIVPatient
 #import matplotlib.pyplot as plt
 from collections import namedtuple, deque
 import math
+from evaluate import evaluate_HIV
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 env = TimeLimit(
@@ -401,6 +160,7 @@ class ProjectAgent:
         state, _ = env.reset()
         epsilon = self.epsilon_max
         step = 0
+        previous_val = 0
         while episode < max_episode:
             # update epsilon
             if step > self.epsilon_delay:
@@ -456,11 +216,24 @@ class ProjectAgent:
                           ", ep return ", '{:4.1f}'.format(episode_cum_reward), 
                           sep='')
 
-                
+
+                validation_score = evaluate_HIV(agent=self, nb_episode=1)          
+                print(f"Episode {episode:3d} | "
+                      f"Epsilon {epsilon:6.2f} | "
+                      f"Batch Size {len(self.memory):5d} | "
+                      f"Episode Return {episode_cum_reward:.2e} | "
+                      f"Evaluation Score {validation_score:.2e}")
                 state, _ = env.reset()
+                if validation_score > previous_val:
+                    previous_val = validation_score
+                    self.best_model = deepcopy(self.model).to(device)
+                    self.save("model_new.pth")
                 episode_cum_reward = 0
             else:
                 state = next_state
+
+        self.model.load_state_dict(self.best_model.state_dict())
+        self.save("model_new.pth")
         return episode_return, MC_avg_discounted_reward, MC_avg_total_reward, V_init_state
     
     def load(self):
@@ -494,5 +267,3 @@ if __name__ == "__main__":
     # Train agent
     agent = ProjectAgent()
     scores = agent.train(env, 350)
-    # save model
-    agent.save('model_new.pth')
